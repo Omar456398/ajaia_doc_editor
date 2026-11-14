@@ -8,11 +8,12 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = env.VITE_BACKEND_PROXY_TARGET || "http://127.0.0.1:8000";
 
   const apiProxy = {
-    // Proxy relative /api requests to FastAPI
+    // Proxy relative /api HTTP and WebSocket requests to FastAPI
     // so frontend always calls same-origin /api (URL-agnostic)
     "/api": {
       target: proxyTarget,
       changeOrigin: true,
+      ws: true,
     },
   };
 
