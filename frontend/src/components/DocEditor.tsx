@@ -4,6 +4,7 @@ import {
   fetchDocDetail,
   flushDocLogs,
   getDocWebSocketUrl,
+  resolveAttachmentUrl,
   submitPerimeterUpdateHttp,
   updateCursorOrSelectionHttp,
   updateDocTitle,
@@ -848,7 +849,7 @@ export function DocEditor({
       el.focus();
 
       const img = document.createElement("img");
-      img.setAttribute("src", url);
+      img.setAttribute("src", resolveAttachmentUrl(url));
       img.setAttribute("alt", filename || "image");
       img.className = "doc-inline-image";
 

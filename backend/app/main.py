@@ -2,7 +2,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -15,15 +16,17 @@ from app.core.seed import seed_initial_data
 import app.models.entities  # noqa: F401 — ensure ORM models are registered
 
 FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
+_db_initialized = False
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    # Ensure database schema, column upgrades, and 20 dummy users exist on startup
+async def ensure_db_initialized() -> None:
+    """Idempotent schema & seed initializer (safe for both Uvicorn lifespan and Vercel cold starts)."""
+    global _db_initialized
+    if _db_initialized:
+        return
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            # Safe idempotent schema upgrades if tables were created by an earlier revision
             await conn.execute(
                 text(
                     "ALTER TABLE user_docs ADD COLUMN IF NOT EXISTS perimeter_start INTEGER NOT NULL DEFAULT 0"
@@ -39,7 +42,6 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                     "ALTER TABLE user_docs ADD COLUMN IF NOT EXISTS is_selection_perimeter BOOLEAN NOT NULL DEFAULT FALSE"
                 )
             )
-            # Normalize any non-selection 256-char perimeters from previous config to 64-char width
             await conn.execute(
                 text(
                     """
@@ -50,7 +52,6 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                     """
                 )
             )
-            # Ensure at most one row per (doc_id, user_id) in doc_edit_logs
             await conn.execute(
                 text(
                     """
@@ -69,9 +70,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             )
         async with AsyncSessionLocal() as db:
             await seed_initial_data(db)
+        _db_initialized = True
     except Exception as exc:
         print(f"[startup] Database initialization warning: {exc}")
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    await ensure_db_initialized()
     collab_manager.start_background_monitor()
     try:
         yield
@@ -87,6 +93,20 @@ def create_app() -> FastAPI:
         redoc_url=f"{settings.API_PREFIX}/redoc",
         lifespan=lifespan,
     )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
+    async def _vercel_cold_start_db_init(request: Request, call_next):
+        if not _db_initialized and request.url.path.startswith(settings.API_PREFIX):
+            await ensure_db_initialized()
+        return await call_next(request)
 
     # Mount all backend endpoints under /api (URL-agnostic relative routing)
     app.include_router(api_router, prefix=settings.API_PREFIX)

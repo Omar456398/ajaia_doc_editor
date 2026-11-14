@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,7 +10,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     API_PREFIX: str = "/api"
     DATABASE_URL: str = (
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/ajaia_doc_editor"
+        os.getenv("DATABASE_URL")
+        or os.getenv("POSTGRES_URL")
+        or "postgresql+asyncpg://postgres:postgres@localhost:5432/ajaia_doc_editor"
     )
 
     model_config = SettingsConfigDict(

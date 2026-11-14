@@ -1,8 +1,28 @@
 /**
  * URL-agnostic API & WebSocket client.
- * Always uses the relative `/api` path on the current origin (`xxx.xxx.xxx/api`).
+ * Defaults to relative `/api` on the current origin, or uses `VITE_API_BASE_URL`
+ * if frontend and backend are deployed on separate domains without a proxy rewrite.
  */
-export const API_BASE_PATH = "/api";
+const rawEnvBase = (
+  (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    ?.VITE_API_BASE_URL ?? ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+export const API_BASE_PATH = rawEnvBase
+  ? rawEnvBase.endsWith("/api")
+    ? rawEnvBase
+    : `${rawEnvBase}/api`
+  : "/api";
+
+export function resolveAttachmentUrl(url: string): string {
+  if (!url) return url;
+  if (url.startsWith("/api/") && API_BASE_PATH !== "/api") {
+    return `${API_BASE_PATH}${url.slice(4)}`;
+  }
+  return url;
+}
 
 export interface User {
   id: number;
@@ -125,6 +145,10 @@ export async function apiFetch<T>(
 }
 
 export function getDocWebSocketUrl(docId: number, token: string): string {
+  if (API_BASE_PATH.startsWith("http://") || API_BASE_PATH.startsWith("https://")) {
+    const wsBase = API_BASE_PATH.replace(/^http/, "ws");
+    return `${wsBase}/ws/docs/${docId}?token=${encodeURIComponent(token)}`;
+  }
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
   return `${proto}//${host}${API_BASE_PATH}/ws/docs/${docId}?token=${encodeURIComponent(token)}`;

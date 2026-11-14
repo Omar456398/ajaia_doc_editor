@@ -1,3 +1,5 @@
+import { resolveAttachmentUrl } from "../api/client";
+
 /**
  * Background Markdown <-> Rich Text HTML engine.
  * The database and collaboration protocol operate on Markdown (.md) in the background,
@@ -86,8 +88,9 @@ function inlineMarkdownToHtml(text: string): string {
     /!\[([^\]]*)\]\(([^)\s]+)\)/g,
     (_match, rawAlt: string, rawSrc: string) => {
       const idx = imagePlaceholders.length;
+      const resolvedSrc = resolveAttachmentUrl(rawSrc);
       imagePlaceholders.push(
-        `<img src="${escapeHtml(rawSrc)}" alt="${escapeHtml(rawAlt)}" class="doc-inline-image" />`
+        `<img src="${escapeHtml(resolvedSrc)}" alt="${escapeHtml(rawAlt)}" class="doc-inline-image" />`
       );
       return `\u0000IMG_${idx}\u0000`;
     }
