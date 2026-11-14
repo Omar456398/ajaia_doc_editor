@@ -16,6 +16,7 @@ async def reset_and_seed() -> None:
 
     print("1. Dropping existing tables...")
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS attachments CASCADE"))
         await conn.execute(text("DROP TABLE IF EXISTS doc_edit_logs CASCADE"))
         await conn.execute(text("DROP TABLE IF EXISTS user_docs CASCADE"))
         await conn.execute(text("DROP TABLE IF EXISTS docs CASCADE"))

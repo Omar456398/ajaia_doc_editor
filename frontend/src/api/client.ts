@@ -63,6 +63,17 @@ export interface PerimeterConfig {
   flush_inactivity_seconds: number;
 }
 
+export interface AttachmentItem {
+  id: number;
+  doc_id: number | null;
+  user_id: number | null;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  url: string;
+  created_at: string | null;
+}
+
 export interface DocDetail {
   id: number;
   title: string;
@@ -140,8 +151,13 @@ export function fetchMe(token: string): Promise<{ user: User }> {
   return apiFetch("/auth/me", undefined, token);
 }
 
-export function fetchDocs(token: string): Promise<{ docs: DocSummary[] }> {
-  return apiFetch("/docs", undefined, token);
+export function fetchDocs(
+  token: string,
+  searchQuery?: string
+): Promise<{ docs: DocSummary[] }> {
+  const q = searchQuery?.trim();
+  const path = q ? `/docs?q=${encodeURIComponent(q)}` : "/docs";
+  return apiFetch(path, undefined, token);
 }
 
 export function createDoc(
@@ -157,6 +173,70 @@ export function createDoc(
     },
     token
   );
+}
+
+export async function uploadDocumentFile(
+  token: string,
+  file: File
+): Promise<{ id: number; title: string; content: string }> {
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  const response = await fetch(`${API_BASE_PATH}/docs/upload`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: formData,
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail || `Upload failed (${response.status})`);
+  }
+  return response.json() as Promise<{
+    id: number;
+    title: string;
+    content: string;
+  }>;
+}
+
+export async function uploadDocAttachment(
+  token: string,
+  docId: number,
+  file: File
+): Promise<AttachmentItem> {
+  const formData = new FormData();
+  formData.append("file", file, file.name || "image.png");
+  const response = await fetch(`${API_BASE_PATH}/docs/${docId}/attachments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: formData,
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      // ignore
+    }
+    throw new Error(detail || `Attachment upload failed (${response.status})`);
+  }
+  return response.json() as Promise<AttachmentItem>;
+}
+
+export function fetchDocAttachments(
+  token: string,
+  docId: number
+): Promise<{ attachments: AttachmentItem[] }> {
+  return apiFetch(`/docs/${docId}/attachments`, undefined, token);
 }
 
 export function fetchDocDetail(

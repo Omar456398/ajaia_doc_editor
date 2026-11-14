@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  fetchDocAttachments,
   fetchDocDetail,
   flushDocLogs,
   getDocWebSocketUrl,
   submitPerimeterUpdateHttp,
   updateCursorOrSelectionHttp,
   updateDocTitle,
+  uploadDocAttachment,
+  type AttachmentItem,
   type Collaborator,
   type DocDetail,
   type User,
@@ -90,8 +93,12 @@ export function DocEditor({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [flushCountdown, setFlushCountdown] = useState<number | null>(null);
   const [lastEditTick, setLastEditTick] = useState(0);
+  const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [showAttachmentsPopover, setShowAttachmentsPopover] = useState(false);
 
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   // Canonical base Markdown in docs.content & current working Markdown
@@ -334,6 +341,11 @@ export function DocEditor({
       requestAnimationFrame(() => {
         applyMarkdownToRichDom(detail.content);
       });
+      void fetchDocAttachments(token, docId)
+        .then((attRes) => setAttachments(attRes.attachments))
+        .catch(() => {
+          // ignore
+        });
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to load document";
@@ -828,13 +840,98 @@ export function DocEditor({
     handleRichEditorInput();
   };
 
+  // Insert a rendered <img> node for an attachment URL into the rich-text editor and persist to doc
+  const insertAttachmentImageIntoEditor = useCallback(
+    (url: string, filename: string) => {
+      const el = editorRef.current;
+      if (!el) return;
+      el.focus();
+
+      const img = document.createElement("img");
+      img.setAttribute("src", url);
+      img.setAttribute("alt", filename || "image");
+      img.className = "doc-inline-image";
+
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(img);
+        range.setStartAfter(img);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } else {
+        const p = document.createElement("p");
+        p.appendChild(img);
+        el.appendChild(p);
+      }
+
+      lastValidHtmlRef.current = el.innerHTML;
+      const { markdown, selStart } = serializeDomWithSelection(el);
+      setContent(markdown);
+      contentRef.current = markdown;
+      setLiveCursor(selStart);
+      liveCursorRef.current = selStart;
+      hasUnsentDebounceRef.current = true;
+      void flushDebouncedPerimeterEdit(markdown, selStart, true, true);
+    },
+    [flushDebouncedPerimeterEdit]
+  );
+
+  // Upload an image (from toolbar button or in-editor paste) to `attachments` and embed in doc
+  const handleUploadImageAttachment = useCallback(
+    async (file: File) => {
+      if (editingDisabledBySelection || overlappingOther) {
+        setBlockedAlert(
+          editingDisabledBySelection
+            ? "Cannot insert attachment while selection overlaps another collaborator's perimeter."
+            : `Cannot insert attachment: overlaps ${overlappingOther?.full_name}'s active perimeter.`
+        );
+        return;
+      }
+      setUploadingAttachment(true);
+      try {
+        const uploaded = await uploadDocAttachment(token, docId, file);
+        setAttachments((prev) => [
+          uploaded,
+          ...prev.filter((a) => a.id !== uploaded.id),
+        ]);
+        insertAttachmentImageIntoEditor(uploaded.url, uploaded.filename);
+      } catch (err) {
+        setBlockedAlert(
+          err instanceof Error ? err.message : "Failed to upload image attachment"
+        );
+      } finally {
+        setUploadingAttachment(false);
+      }
+    },
+    [
+      docId,
+      editingDisabledBySelection,
+      insertAttachmentImageIntoEditor,
+      overlappingOther,
+      token,
+    ]
+  );
+
   const handleTitleBlur = async () => {
-    if (!doc || !title.trim() || title.trim() === doc.title) return;
+    if (!doc) return;
+    if (!doc.is_owner) {
+      setTitle(doc.title);
+      return;
+    }
+    if (!title.trim()) {
+      setTitle(doc.title);
+      return;
+    }
+    if (title.trim() === doc.title) return;
     try {
       const res = await updateDocTitle(token, docId, title.trim());
       setTitle(res.title);
+      setDoc((prev) => (prev ? { ...prev, title: res.title } : prev));
     } catch {
-      // ignore
+      setTitle(doc.title);
     }
   };
 
@@ -937,12 +1034,27 @@ export function DocEditor({
                 <input
                   type="text"
                   value={title}
-                  onChange={(e) => setTitle(e.target.value)}
+                  disabled={!doc.is_owner}
+                  readOnly={!doc.is_owner}
+                  title={
+                    doc.is_owner
+                      ? "Click to rename document"
+                      : "Only the document owner can rename this document"
+                  }
+                  onChange={(e) => {
+                    if (doc.is_owner) {
+                      setTitle(e.target.value);
+                    }
+                  }}
                   onBlur={() => void handleTitleBlur()}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") e.currentTarget.blur();
                   }}
-                  className="rounded px-2 py-0.5 text-base font-semibold text-slate-900 hover:border-slate-300 focus:border-blue-600 focus:bg-white border border-transparent focus:outline-hidden truncate max-w-xs sm:max-w-md"
+                  className={`rounded px-2 py-0.5 text-base font-semibold text-slate-900 border border-transparent focus:outline-hidden truncate max-w-xs sm:max-w-md ${
+                    doc.is_owner
+                      ? "hover:border-slate-300 focus:border-blue-600 focus:bg-white"
+                      : "cursor-default select-none opacity-90"
+                  }`}
                 />
               </div>
 
@@ -1213,6 +1325,111 @@ export function DocEditor({
             >
               &ldquo; Quote
             </button>
+            <span className="mx-1 h-4 w-px bg-slate-300" />
+            <input
+              ref={attachmentInputRef}
+              type="file"
+              accept="image/*"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (file) {
+                  void handleUploadImageAttachment(file);
+                }
+              }}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={editingDisabledBySelection || uploadingAttachment}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                attachmentInputRef.current?.click();
+              }}
+              className="inline-flex items-center gap-1 rounded px-2.5 py-1 font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 disabled:opacity-40 transition cursor-pointer"
+              title="Upload image attachment (or paste image directly in editor)"
+            >
+              <svg
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                />
+              </svg>
+              {uploadingAttachment ? "Uploading..." : "Attach Image"}
+            </button>
+            {attachments.length > 0 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowAttachmentsPopover((prev) => !prev)}
+                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-200/80 transition cursor-pointer"
+                  title="View document attachments"
+                >
+                  📎 Attachments ({attachments.length})
+                </button>
+                {showAttachmentsPopover && (
+                  <div className="absolute left-0 mt-1.5 w-64 rounded-xl bg-white border border-slate-200 shadow-lg p-2.5 z-40 space-y-1.5">
+                    <div className="flex items-center justify-between px-1 pb-1 border-b border-slate-100">
+                      <span className="text-[11px] font-semibold text-slate-700">
+                        Persisted Attachments ({attachments.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowAttachmentsPopover(false)}
+                        className="text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto space-y-1">
+                      {attachments.map((att) => (
+                        <div
+                          key={att.id}
+                          className="flex items-center justify-between gap-2 rounded-lg p-1.5 hover:bg-slate-50 text-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <img
+                              src={att.url}
+                              alt={att.filename}
+                              className="h-7 w-7 rounded object-cover border border-slate-200 shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <div className="truncate font-medium text-slate-800 text-[11px]">
+                                {att.filename}
+                              </div>
+                              <div className="truncate text-[10px] text-slate-400 font-mono">
+                                {att.url}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              insertAttachmentImageIntoEditor(
+                                att.url,
+                                att.filename
+                              );
+                              setShowAttachmentsPopover(false);
+                            }}
+                            className="shrink-0 rounded bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700 hover:bg-blue-100 cursor-pointer"
+                          >
+                            Insert
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Subtle Perimeter Indicator on right side of toolbar */}
@@ -1324,6 +1541,33 @@ export function DocEditor({
                 setBlockedAlert(
                   "Paste blocked: selection overlaps another user's perimeter. Deselect first."
                 );
+                return;
+              }
+              const items = Array.from(e.clipboardData?.items ?? []);
+              const imageItem = items.find((item) =>
+                item.type.startsWith("image/")
+              );
+              if (imageItem) {
+                const blob = imageItem.getAsFile();
+                if (blob) {
+                  e.preventDefault();
+                  const ext = blob.type.split("/")[1] || "png";
+                  const file = new File(
+                    [blob],
+                    blob.name && blob.name !== "image.png"
+                      ? blob.name
+                      : `pasted-image-${Date.now()}.${ext}`,
+                    { type: blob.type }
+                  );
+                  void handleUploadImageAttachment(file);
+                  return;
+                }
+              }
+              const files = Array.from(e.clipboardData?.files ?? []);
+              const imageFile = files.find((f) => f.type.startsWith("image/"));
+              if (imageFile) {
+                e.preventDefault();
+                void handleUploadImageAttachment(imageFile);
               }
             }}
             onKeyDown={(e) => {

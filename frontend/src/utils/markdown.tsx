@@ -59,6 +59,7 @@ export function applyRemoteSplice(
  */
 export function markdownToPlainText(md: string): string {
   return md
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "[Image: $1]")
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/^>\s+/gm, "")
     .replace(/^[-*]\s+\[[ xX]\]\s+/gm, "• ")
@@ -75,16 +76,32 @@ function escapeHtml(raw: string): string {
   return raw
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function inlineMarkdownToHtml(text: string): string {
-  const escaped = escapeHtml(text);
-  return escaped
+  const imagePlaceholders: string[] = [];
+  const withPlaceholders = text.replace(
+    /!\[([^\]]*)\]\(([^)\s]+)\)/g,
+    (_match, rawAlt: string, rawSrc: string) => {
+      const idx = imagePlaceholders.length;
+      imagePlaceholders.push(
+        `<img src="${escapeHtml(rawSrc)}" alt="${escapeHtml(rawAlt)}" class="doc-inline-image" />`
+      );
+      return `\u0000IMG_${idx}\u0000`;
+    }
+  );
+
+  const formatted = escapeHtml(withPlaceholders)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>")
     .replace(/~~([^~]+)~~/g, "<s>$1</s>");
+
+  return formatted.replace(/\u0000IMG_(\d+)\u0000/g, (_m, idxStr: string) => {
+    return imagePlaceholders[Number(idxStr)] ?? "";
+  });
 }
 
 /**
@@ -266,6 +283,21 @@ export function serializeDomWithSelection(root: HTMLElement): {
       return;
     }
 
+    if (tag === "img") {
+      checkBoundary(el, 0);
+      const rawSrc = el.getAttribute("src") ?? "";
+      const src = rawSrc.replace(
+        /^https?:\/\/[^/]+(\/api\/attachments\/\d+.*)$/,
+        "$1"
+      );
+      const alt = (el.getAttribute("alt") ?? "image").replace(/[\[\]]/g, "");
+      if (src) {
+        md += `![${alt}](${src})`;
+      }
+      checkBoundary(el, 1);
+      return;
+    }
+
     let marker = "";
     if (tag === "strong" || tag === "b") marker = "**";
     else if (tag === "em" || tag === "i") marker = "*";
@@ -329,6 +361,12 @@ export function serializeDomWithSelection(root: HTMLElement): {
     if (tag === "hr") {
       checkBoundary(block, 0);
       md += "---";
+      continue;
+    }
+
+    if (tag === "img") {
+      serializeInline(block);
+      olCounter = 1;
       continue;
     }
 

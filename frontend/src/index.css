@@ -87,3 +87,14 @@
   border-top: 1px solid #cbd5e1;
   margin: 1.25rem 0;
 }
+
+.rich-doc-editor img,
+.doc-inline-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  border: 1px solid #e2e8f0;
+  margin: 0.5rem 0;
+  display: inline-block;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}

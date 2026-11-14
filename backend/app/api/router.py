@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
+import mimetypes
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -7,6 +9,8 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -36,7 +40,11 @@ from app.core.collab import (
 )
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, get_db
-from app.models.entities import Doc, DocEditLog, User, UserDoc
+from app.core.doc_converter import (
+    convert_document_bytes_to_markdown,
+    parse_upload_request,
+)
+from app.models.entities import Attachment, Doc, DocEditLog, User, UserDoc
 
 api_router = APIRouter()
 
@@ -823,6 +831,7 @@ async def get_me(current_user: User = Depends(get_current_user)) -> dict[str, An
 
 @api_router.get("/docs", tags=["docs"])
 async def list_my_docs(
+    q: str | None = Query(default=None, description="Optional filename/title search query"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
@@ -832,8 +841,10 @@ async def list_my_docs(
         .join(UserDoc, UserDoc.doc_id == Doc.id)
         .where(UserDoc.user_id == current_user.id)
         .options(selectinload(Doc.user_docs).selectinload(UserDoc.user))
-        .order_by(Doc.updated_at.desc())
+        .order_by(Doc.updated_at.desc(), Doc.id.desc())
     )
+    if q and q.strip():
+        stmt = stmt.where(Doc.title.ilike(f"%{q.strip()}%"))
     res = await db.execute(stmt)
     docs = res.scalars().unique().all()
 
@@ -900,6 +911,199 @@ async def create_doc(
     await db.refresh(new_doc)
 
     return {"id": new_doc.id, "title": new_doc.title}
+
+
+@api_router.post("/docs/upload", tags=["docs"])
+async def upload_doc_as_markdown(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Upload a .doc, .docx, .md, or .txt file from the main dashboard and create
+    an actual Markdown Doc entry in the `docs` table (not an attachment).
+    """
+    filename, _content_type, file_bytes, _extra = await parse_upload_request(request)
+    title, md_content = convert_document_bytes_to_markdown(filename, file_bytes)
+
+    new_doc = Doc(title=title, content=md_content)
+    db.add(new_doc)
+    await db.flush()
+
+    owner_link = UserDoc(
+        user_id=current_user.id,
+        doc_id=new_doc.id,
+        is_owner=True,
+        cursor_pos=0,
+        perimeter_start=0,
+        perimeter_end=PERIMETER_WIDTH,
+        is_selection_perimeter=False,
+        is_editing=False,
+    )
+    db.add(owner_link)
+    await db.commit()
+    await db.refresh(new_doc)
+
+    return {
+        "id": new_doc.id,
+        "title": new_doc.title,
+        "content": new_doc.content,
+    }
+
+
+def serialize_attachment(att: Attachment) -> dict[str, Any]:
+    return {
+        "id": att.id,
+        "doc_id": att.doc_id,
+        "user_id": att.user_id,
+        "filename": att.filename,
+        "content_type": att.content_type,
+        "size_bytes": att.size_bytes,
+        "url": f"/api/attachments/{att.id}",
+        "created_at": att.created_at.isoformat() if att.created_at else None,
+    }
+
+
+@api_router.get("/attachments", tags=["attachments"])
+async def list_attachments(
+    doc_id: int | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Fetch metadata for attachments (optionally filtered by doc_id)."""
+    stmt = select(Attachment).order_by(Attachment.created_at.desc(), Attachment.id.desc())
+    if doc_id is not None:
+        stmt = stmt.where(Attachment.doc_id == doc_id)
+    res = await db.execute(stmt)
+    rows = list(res.scalars().all())
+    return {"attachments": [serialize_attachment(a) for a in rows]}
+
+
+@api_router.get("/docs/{doc_id}/attachments", tags=["attachments"])
+async def list_doc_attachments(
+    doc_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Fetch all attachments belonging to a specific document."""
+    stmt = (
+        select(Attachment)
+        .where(Attachment.doc_id == doc_id)
+        .order_by(Attachment.created_at.desc(), Attachment.id.desc())
+    )
+    res = await db.execute(stmt)
+    rows = list(res.scalars().all())
+    return {"attachments": [serialize_attachment(a) for a in rows]}
+
+
+@api_router.post("/attachments", tags=["attachments"])
+async def upload_attachment(
+    request: Request,
+    doc_id: int | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Upload or paste an image/attachment and persist it in the `attachments` table."""
+    filename, content_type, file_bytes, extra = await parse_upload_request(request)
+    resolved_doc_id = doc_id
+    if resolved_doc_id is None and "doc_id" in extra and str(extra["doc_id"]).isdigit():
+        resolved_doc_id = int(extra["doc_id"])
+
+    att = Attachment(
+        doc_id=resolved_doc_id,
+        user_id=current_user.id,
+        filename=filename,
+        content_type=content_type,
+        size_bytes=len(file_bytes),
+        data=file_bytes,
+    )
+    db.add(att)
+    await db.commit()
+    await db.refresh(att)
+    return {"attachment": serialize_attachment(att), **serialize_attachment(att)}
+
+
+@api_router.post("/docs/{doc_id}/attachments", tags=["attachments"])
+async def upload_doc_attachment(
+    doc_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Upload or paste an image/attachment into a specific document and persist in `attachments`."""
+    filename, content_type, file_bytes, _extra = await parse_upload_request(request)
+    att = Attachment(
+        doc_id=doc_id,
+        user_id=current_user.id,
+        filename=filename,
+        content_type=content_type,
+        size_bytes=len(file_bytes),
+        data=file_bytes,
+    )
+    db.add(att)
+    await db.commit()
+    await db.refresh(att)
+    return {"attachment": serialize_attachment(att), **serialize_attachment(att)}
+
+
+def _detect_media_type(data: bytes, stored_content_type: str | None, filename: str) -> str:
+    if stored_content_type and stored_content_type != "application/octet-stream":
+        return stored_content_type
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.lstrip().startswith((b"<svg", b"<?xml")):
+        return "image/svg+xml"
+    guessed, _ = mimetypes.guess_type(filename or "")
+    return guessed or stored_content_type or "application/octet-stream"
+
+
+@api_router.get("/attachments/{attachment_id}", tags=["attachments"])
+@api_router.get("/docs/{doc_id}/attachments/{attachment_id}", tags=["attachments"])
+async def get_attachment_binary(
+    attachment_id: int,
+    doc_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Serve an attachment binary by ID so `<img src="/api/attachments/{id}">` renders directly."""
+    res = await db.execute(select(Attachment).where(Attachment.id == attachment_id))
+    att = res.scalars().first()
+    if not att:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    raw_bytes = bytes(att.data) if att.data is not None else b""
+    media_type = _detect_media_type(raw_bytes, att.content_type, att.filename)
+
+    # HTTP response headers in Starlette/Uvicorn are encoded as latin-1.
+    # Filenames such as macOS screenshots contain U+202F (narrow no-break space) or other Unicode
+    # characters, so we provide a pure-ASCII fallback plus RFC 5987 UTF-8 percent-encoded filename*.
+    cleaned_name = (
+        (att.filename or f"attachment-{att.id}")
+        .replace('"', "")
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace("\u202f", " ")
+        .replace("\u00a0", " ")
+    )
+    ascii_name = (
+        cleaned_name.encode("ascii", errors="ignore").decode("ascii").strip()
+        or f"attachment-{att.id}"
+    )
+    utf8_encoded = quote(cleaned_name, safe="")
+
+    return Response(
+        content=raw_bytes,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "Content-Disposition": f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_encoded}",
+        },
+    )
 
 
 @api_router.get("/docs/{doc_id}", tags=["docs"])
@@ -986,8 +1190,14 @@ async def update_doc_title(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    if not any(ud.user_id == current_user.id for ud in doc.user_docs):
+    my_ud = next((ud for ud in doc.user_docs if ud.user_id == current_user.id), None)
+    if not my_ud:
         raise HTTPException(status_code=403, detail="Not authorized for this document")
+    if not my_ud.is_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the document owner can rename this document",
+        )
 
     doc.title = payload.title.strip()
     doc.updated_at = datetime.now(timezone.utc)

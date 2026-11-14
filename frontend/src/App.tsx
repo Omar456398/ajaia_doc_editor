@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createDoc,
   deleteDoc,
@@ -6,6 +6,7 @@ import {
   fetchDummyUsers,
   fetchMe,
   loginUser,
+  uploadDocumentFile,
   type DocSummary,
   type User,
 } from "./api/client";
@@ -32,7 +33,10 @@ export function App() {
   // Dashboard state
   const [docs, setDocs] = useState<DocSummary[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [activeDocId, setActiveDocIdState] = useState<number | null>(() => {
     const saved = sessionStorage.getItem(SESSION_ACTIVE_DOC_KEY);
     if (saved && /^\d+$/.test(saved)) {
@@ -131,6 +135,26 @@ export function App() {
       setActiveDocId(created.id);
     } catch {
       // ignore
+    }
+  };
+
+  const handleUploadDocChange = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !token) return;
+    setUploadingDoc(true);
+    setUploadError(null);
+    try {
+      const created = await uploadDocumentFile(token, file);
+      setActiveDocId(created.id);
+    } catch (err) {
+      setUploadError(
+        err instanceof Error ? err.message : "Failed to import document"
+      );
+    } finally {
+      setUploadingDoc(false);
     }
   };
 
@@ -310,8 +334,9 @@ export function App() {
   }
 
   // 3. Google Docs Home Dashboard View
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const filteredDocs = docs.filter((d) =>
-    d.title.toLowerCase().includes(searchQuery.toLowerCase())
+    (d.title ?? "").toLowerCase().includes(normalizedSearchQuery)
   );
 
   return (
@@ -385,16 +410,30 @@ export function App() {
       {/* Start a new document Gallery Ribbon */}
       <section className="bg-[#F1F3F4] border-b border-slate-200 py-6 px-6">
         <div className="max-w-5xl mx-auto space-y-3">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-            Start a new document
-          </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 max-w-2xl">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-600">
+              Start a new document
+            </h2>
+            {uploadError && (
+              <span className="text-xs font-medium text-rose-600">
+                {uploadError}
+              </span>
+            )}
+          </div>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".doc,.docx,.md,.txt"
+            onChange={(e) => void handleUploadDocChange(e)}
+            className="hidden"
+          />
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-3xl">
             <button
               type="button"
               onClick={() =>
                 void handleCreateDoc(
                   "Untitled Document",
-                  "# Untitled Document\n\nStart writing in Markdown here...\n"
+                  "# Untitled Document\n\nStart writing here...\n"
                 )
               }
               className="group text-left space-y-2 cursor-pointer"
@@ -404,6 +443,37 @@ export function App() {
               </div>
               <div className="text-xs font-medium text-slate-800">
                 Blank document
+              </div>
+            </button>
+
+            <button
+              type="button"
+              disabled={uploadingDoc}
+              onClick={() => uploadInputRef.current?.click()}
+              className="group text-left space-y-2 cursor-pointer disabled:opacity-60"
+            >
+              <div className="h-36 rounded-lg bg-white border border-dashed border-blue-300 group-hover:border-blue-600 group-hover:bg-blue-50/30 shadow-2xs p-4 flex flex-col items-center justify-center gap-2 transition">
+                <svg
+                  className="h-8 w-8 text-blue-600"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.8}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
+                  />
+                </svg>
+                <span className="text-[11px] font-medium text-slate-500 text-center">
+                  {uploadingDoc
+                    ? "Importing..."
+                    : ".doc, .docx, .md, .txt"}
+                </span>
+              </div>
+              <div className="text-xs font-medium text-slate-800">
+                Upload document
               </div>
             </button>
 
@@ -477,14 +547,27 @@ export function App() {
           </div>
         ) : filteredDocs.length === 0 ? (
           <div className="rounded-xl bg-white border border-slate-200 p-10 text-center space-y-2">
-            <div className="text-sm font-medium text-slate-700">
-              No documents shared with @{currentUser.username} yet
-            </div>
-            <p className="text-xs text-slate-500">
-              Create a new blank document above, or sign in as{" "}
-              <strong>Alex Rivera</strong> to share the starter document with{" "}
-              {currentUser.full_name}.
-            </p>
+            {normalizedSearchQuery ? (
+              <>
+                <div className="text-sm font-medium text-slate-700">
+                  No documents matching &ldquo;{searchQuery.trim()}&rdquo;
+                </div>
+                <p className="text-xs text-slate-500">
+                  Try searching for a different document file name or clear the search filter.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="text-sm font-medium text-slate-700">
+                  No documents shared with @{currentUser.username} yet
+                </div>
+                <p className="text-xs text-slate-500">
+                  Create a new blank document above, or sign in as{" "}
+                  <strong>Alex Rivera</strong> to share the starter document with{" "}
+                  {currentUser.full_name}.
+                </p>
+              </>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

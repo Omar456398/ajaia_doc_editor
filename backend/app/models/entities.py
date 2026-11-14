@@ -4,6 +4,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -58,6 +59,9 @@ class Doc(Base):
     )
     edit_logs: Mapped[list["DocEditLog"]] = relationship(
         "DocEditLog", back_populates="doc", cascade="all, delete-orphan"
+    )
+    attachments: Mapped[list["Attachment"]] = relationship(
+        "Attachment", back_populates="doc", cascade="all, delete-orphan"
     )
 
 
@@ -119,3 +123,32 @@ class DocEditLog(Base):
 
     doc: Mapped["Doc"] = relationship("Doc", back_populates="edit_logs")
     user: Mapped["User"] = relationship("User")
+
+
+class Attachment(Base):
+    """
+    Binary attachment (e.g., uploaded or pasted image) persisted in PostgreSQL
+    and referenced inside documents by URL (/api/attachments/{id}).
+    """
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    doc_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("docs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="application/octet-stream"
+    )
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    doc: Mapped["Doc | None"] = relationship("Doc", back_populates="attachments")
+    user: Mapped["User | None"] = relationship("User")

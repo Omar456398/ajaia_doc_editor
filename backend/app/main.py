@@ -83,7 +83,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         openapi_url=f"{settings.API_PREFIX}/openapi.json",
-        docs_url=f"{settings.API_PREFIX}/docs",
+        docs_url=f"{settings.API_PREFIX}/swagger",
         redoc_url=f"{settings.API_PREFIX}/redoc",
         lifespan=lifespan,
     )
